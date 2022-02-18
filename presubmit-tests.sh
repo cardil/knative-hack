@@ -17,10 +17,7 @@
 # This is a helper script for Knative presubmit test scripts.
 # See README.md for instructions on how to use it.
 
-source $(dirname "${BASH_SOURCE[0]}")/library.sh
-
-# Custom configuration of presubmit tests
-readonly PRESUBMIT_TEST_FAIL_FAST=${PRESUBMIT_TEST_FAIL_FAST:-0}
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/library.sh"
 
 # Extensions or file patterns that don't require presubmit tests.
 readonly NO_PRESUBMIT_FILES=(\.png \.gitignore \.gitattributes ^OWNERS ^OWNERS_ALIASES ^AUTHORS)
@@ -72,9 +69,11 @@ function initialize_environment() {
 # Parameters: $1 - test group name (e.g., build)
 #             $2 - result (0=passed, 1=failed)
 function results_banner() {
-  local result
-  [[ $2 -eq 0 ]] && result="PASSED" || result="FAILED"
-  header "$1 tests ${result}"
+  if [[ $2 -eq 0 ]]; then
+    logger.success "$1 tests PASSED"
+  else
+    logger.error "$1 tests FAILED"
+  fi
 }
 
 # Run build tests. If there's no `build_tests` function, run the default
@@ -85,6 +84,7 @@ function run_build_tests() {
   local failed=0
   # Run pre-build tests, if any
   if function_exists pre_build_tests; then
+    subheader 'Running pre build tests'
     pre_build_tests || { failed=1; step_failed "pre_build_tests"; }
   fi
   # Don't run build tests if pre-build tests failed
@@ -97,6 +97,7 @@ function run_build_tests() {
   fi
   # Don't run post-build tests if pre/build tests failed
   if (( ! failed )) && function_exists post_build_tests; then
+    subheader 'Running post build tests'
     post_build_tests || { failed=1; step_failed "post_build_tests"; }
   fi
   results_banner "Build" ${failed}
@@ -162,7 +163,6 @@ function run_unit_tests() {
     return 0
   fi
   header "Running unit tests"
-  local failed=0
   # Run pre-unit tests, if any
   if function_exists pre_unit_tests; then
     pre_unit_tests || { failed=1; step_failed "pre_unit_tests"; }
@@ -185,7 +185,7 @@ function run_unit_tests() {
 
 # Default unit test runner that runs all go tests in the repo.
 function default_unit_test_runner() {
-  report_go_test -race -count 1 ./...
+  report_go_test -race -short -count 1 ./...
 }
 
 # Run integration tests. If there's no `integration_tests` function, run the
@@ -317,10 +317,10 @@ function main() {
     shift
   done
 
-  readonly RUN_BUILD_TESTS
-  readonly RUN_UNIT_TESTS
-  readonly RUN_INTEGRATION_TESTS
-  readonly TESTS_TO_RUN
+  readonly RUN_BUILD_TESTS \
+    RUN_UNIT_TESTS \
+    RUN_INTEGRATION_TESTS \
+    TESTS_TO_RUN
 
   cd "${REPO_ROOT_DIR}" || exit
 
@@ -338,19 +338,13 @@ function main() {
       exit 0
     fi
     for test_to_run in "${TESTS_TO_RUN[@]}"; do
-      ${test_to_run} || { failed=1; step_failed "${test_to_run}"; }
+      ${test_to_run}
     done
   fi
 
-  run_build_tests || { failed=1; step_failed "run_build_tests"; }
-  # If PRESUBMIT_TEST_FAIL_FAST is set to true, don't run unit tests if build tests failed
-  if (( ! PRESUBMIT_TEST_FAIL_FAST )) || (( ! failed )); then
-    run_unit_tests || { failed=1; step_failed "run_unit_tests"; }
-  fi
-  # If PRESUBMIT_TEST_FAIL_FAST is set to true, don't run integration tests if build/unit tests failed
-  if (( ! PRESUBMIT_TEST_FAIL_FAST )) || (( ! failed )); then
-    run_integration_tests || { failed=1; step_failed "run_integration_tests"; }
-  fi
+  run_build_tests
+  run_unit_tests
+  run_integration_tests
 
-  exit ${failed}
+  logger.success 'Presubmit tests passed'
 }

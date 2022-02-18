@@ -33,7 +33,7 @@ function post_build_tests() {
   local failed=0
   for script in *.sh; do
     subheader "Checking integrity of ${script}"
-    bash -c "source ${script}" || { failed=1; echo "--- FAIL: ${script}"; }
+    bash -c "set -Eeuo pipefail; source ${script}"
   done
   return ${failed}
 }

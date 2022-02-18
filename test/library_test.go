@@ -36,7 +36,7 @@ func signal(s os.Signal) {
 }
 
 func TestSucceeds(t *testing.T) {
-	// Always succeed.
+	t.Log("Always succeed")
 }
 
 func TestFails(t *testing.T) {

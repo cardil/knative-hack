@@ -18,7 +18,6 @@
 # See README.md for instructions on how to use it.
 
 source $(dirname "${BASH_SOURCE[0]}")/library.sh
-set -x
 
 # Organization name in GitHub; defaults to Knative.
 readonly ORG_NAME="${ORG_NAME:-knative}"
@@ -36,7 +35,7 @@ readonly GEO_REPLICATION=(us eu asia)
 # Simple banner for logging purposes.
 # Parameters: $1 - message to display.
 function banner() {
-    make_banner "@" "$1"
+    logger.info "$1"
 }
 
 # Tag images in the yaml files if $TAG is not empty.
@@ -108,7 +107,7 @@ export GITHUB_TOKEN=""
 # Convenience function to run the hub tool.
 # Parameters: $1..$n - arguments to hub.
 function hub_tool() {
-  run_go_tool github.com/github/hub hub $@
+  run_go_tool github.com/github/hub "$@"
 }
 
 # Shortcut to "git push" that handles authentication.

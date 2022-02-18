@@ -38,9 +38,10 @@ fi
 # Useful environment variables
 [[ -v PROW_JOB_ID ]] && IS_PROW=1 || IS_PROW=0
 readonly IS_PROW
-[[ ! -v REPO_ROOT_DIR ]] && REPO_ROOT_DIR="$(git rev-parse --show-toplevel)"
+REPO_ROOT_DIR="${REPO_ROOT_DIR:-$(git rev-parse --show-toplevel)}"
 readonly REPO_ROOT_DIR
-readonly REPO_NAME="$(basename ${REPO_ROOT_DIR})"
+REPO_NAME="$(basename "${REPO_ROOT_DIR}")"
+readonly REPO_NAME
 
 # Useful flags about the current OS
 IS_LINUX=0
@@ -63,6 +64,8 @@ fi
 
 # On a Prow job, redirect stderr to stdout so it's synchronously added to log
 (( IS_PROW )) && exec 2>&1
+
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/ui.bash"
 
 # Return the major version of a release.
 # For example, "v0.2.1" returns "0"
@@ -92,36 +95,25 @@ function patch_version() {
 # Print error message and exit 1
 # Parameters: $1..$n - error message to be displayed
 function abort() {
-  echo "error: $*"
+  logger.error "$*"
   exit 1
-}
-
-# Display a box banner.
-# Parameters: $1 - character to use for the box.
-#             $2 - banner message.
-function make_banner() {
-  local msg="$1$1$1$1 $2 $1$1$1$1"
-  local border="${msg//[-0-9A-Za-z _.,\/()\']/$1}"
-  echo -e "${border}\n${msg}\n${border}"
-  # TODO(adrcunha): Remove once logs have timestamps on Prow
-  # For details, see https://github.com/kubernetes/test-infra/issues/10100
-  echo -e "$1$1$1$1 $(TZ='America/Los_Angeles' date)\n${border}"
 }
 
 # Simple header for logging purposes.
 function header() {
-  local upper="$(echo $1 | tr a-z A-Z)"
-  make_banner "=" "${upper}"
+  local upper
+  upper="$(echo "$*" | tr '[:lower:]' '[:upper:]')"
+  logger.info "=== $upper ==="
 }
 
 # Simple subheader for logging purposes.
 function subheader() {
-  make_banner "-" "$1"
+  logger.info "--- $* ---"
 }
 
 # Simple warning banner for logging purposes.
 function warning() {
-  make_banner "!" "$1"
+  logger.warn "$*"
 }
 
 # Checks whether the given function exists.
@@ -405,7 +397,7 @@ function capture_output() {
 # Parameters: $1...n - description of step that failed
 function step_failed() {
   local spyglass_token="Step failed:"
-  echo "${spyglass_token} $@"
+  logger.error "${spyglass_token} $*"
 }
 
 # Create a temporary file with the given extension in a way that works on both Linux and macOS.
@@ -429,7 +421,7 @@ function mktemp_with_extension() {
 function create_junit_xml() {
   local xml
   xml="$(mktemp_with_extension "${ARTIFACTS}"/junit_XXXXXXXX xml)"
-  echo "JUnit file ${xml} is created for reporting the test result"
+  logger.debug "JUnit report file for suite '$1' named '$2': ${xml}"
   run_kntest junit --suite="$1" --name="$2" --err-msg="$3" --dest="${xml}" || return 1
 }
 
@@ -437,21 +429,31 @@ function create_junit_xml() {
 # Parameters: $1... - parameters to go test
 function report_go_test() {
   local go_test_args=( "$@" )
-  # Install gotestsum if necessary.
-  run_go_tool gotest.tools/gotestsum gotestsum --help > /dev/null 2>&1
   # Capture the test output to the report file.
-  local report
+  local report xml test_output_jsonl test_output_html
   report="$(mktemp)"
-  local xml
   xml="$(mktemp_with_extension "${ARTIFACTS}"/junit_XXXXXXXX xml)"
-  echo "Running go test with args: ${go_test_args[*]}"
-  capture_output "${report}" gotestsum --format "${GO_TEST_VERBOSITY:-testname}" \
-    --junitfile "${xml}" --junitfile-testsuite-name relative --junitfile-testcase-classname relative \
+  test_output_jsonl="$(mktemp_with_extension "${ARTIFACTS}"/test-output-XXXXXX jsonl)"
+  test_output_html="${test_output_jsonl%.*}.html"
+  logger.debug "Running go test with args: ${go_test_args[*]}"
+  capture_output "${report}" run_go_tool gotest.tools/gotestsum \
+    --format "${GO_TEST_VERBOSITY:-testname}" \
+    --jsonfile "${test_output_jsonl}" \
+    --junitfile "${xml}" \
+    --junitfile-testsuite-name relative \
+    --junitfile-testcase-classname relative \
     -- "${go_test_args[@]}"
   local failed=$?
-  echo "Finished run, return code is ${failed}"
+  logger.debug "Finished run, return code is ${failed}"
 
-  echo "XML report written to ${xml}"
+  run_go_tool github.com/haveyoudebuggedit/gotestfmt/v2/cmd/gotestfmt \
+    -showteststatus \
+    -input "${test_output_jsonl}" | \
+    run_go_tool github.com/buildkite/terminal-to-html/v3/cmd/terminal-to-html \
+      --preview > "$test_output_html"
+  logger.debug "HTML report written to ${test_output_html}"
+
+  logger.debug "XML report written to ${xml}"
   if [[ -n "$(grep '<testsuites></testsuites>' "${xml}")" ]]; then
     # XML report is empty, something's wrong; use the output as failure reason
     create_junit_xml _go_tests "GoTests" "$(cat "${report}")"
@@ -465,7 +467,7 @@ function report_go_test() {
     local logfile=${xml/junit_/go_test_}
     logfile=${logfile/.xml/.log}
     cp "${report}" "${logfile}"
-    echo "Test log written to ${logfile}"
+    logger.debug "Test log written to ${logfile}"
   fi
   return ${failed}
 }
@@ -477,11 +479,11 @@ function report_go_test() {
 function start_knative_serving() {
   header "Starting Knative Serving"
   subheader "Installing Knative Serving"
-  echo "Installing Serving CRDs from $1"
+  logger.debug "Installing Serving CRDs from $1"
   kubectl apply -f "$1"
-  echo "Installing Serving core components from $2"
+  logger.debug "Installing Serving core components from $2"
   kubectl apply -f "$2"
-  echo "Installing net-istio components from $3"
+  logger.debug "Installing net-istio components from $3"
   kubectl apply -f "$3"
   wait_until_pods_running knative-serving || return 1
 }
@@ -504,9 +506,9 @@ function start_latest_knative_serving() {
 function start_knative_eventing() {
   header "Starting Knative Eventing"
   subheader "Installing Knative Eventing"
-  echo "Installing Eventing CRDs from $1"
+  logger.debug "Installing Eventing CRDs from $1"
   kubectl apply --selector knative.dev/crd-install=true -f "$1"
-  echo "Installing the rest of eventing components from $1"
+  logger.debug "Installing the rest of eventing components from $1"
   kubectl apply -f "$1"
   wait_until_pods_running knative-eventing || return 1
 }
@@ -527,7 +529,7 @@ function start_latest_knative_eventing() {
 #             $2 - Namespace to look for ready pods into
 function start_knative_eventing_extension() {
   header "Starting Knative Eventing Extension"
-  echo "Installing Extension CRDs from $1"
+  logger.debug "Installing Extension CRDs from $1"
   kubectl apply -f "$1"
   wait_until_pods_running "$2" || return 1
 }
@@ -543,31 +545,25 @@ function start_latest_eventing_sugar_controller() {
   start_knative_eventing_extension "${KNATIVE_EVENTING_SUGAR_CONTROLLER_RELEASE}" "knative-eventing"
 }
 
-# Run a go tool, installing it first if necessary.
-# Parameters: $1 - tool package/dir for go get/install.
-#             $2 - tool to run.
-#             $3..$n - parameters passed to the tool.
+# Run a go tool, installing it if necessary in `$ARTIFACTS/tools` dir.
+# Parameters: $1 - tool package/dir for go install.
+#             $2..$n - parameters passed to the tool.
 function run_go_tool() {
-  local tool=$2
-  local install_failed=0
-  if [[ -z "$(which ${tool})" ]]; then
-    local action=get
-    [[ $1 =~ ^[\./].* ]] && action=install
-    # Avoid running `go get` from root dir of the repository, as it can change go.sum and go.mod files.
-    # See discussions in https://github.com/golang/go/issues/27643.
-    if [[ ${action} == "get" && $(pwd) == "${REPO_ROOT_DIR}" ]]; then
-      local temp_dir="$(mktemp -d)"
-      # Swallow the output as we are returning the stdout in the end.
-      pushd "${temp_dir}" > /dev/null 2>&1
-      GOFLAGS="" go ${action} "$1" || install_failed=1
-      popd > /dev/null 2>&1
-    else
-      GOFLAGS="" go ${action} "$1" || install_failed=1
+  local tool tool_pkg toolbin toolpath
+  tool_pkg=${1:?Pass a tool package as arg[1]}
+  tool="$(basename "${tool_pkg}")"
+  toolbin="${ARTIFACTS:-$(mktemp -d)}/tools"
+  toolpath="${toolbin}/${tool}"
+  if ! [[ -f "$toolpath" ]]; then
+    mkdir -p "$toolbin"
+    local version='@latest'
+    if [[ $1 =~ ^[\./].* ]]; then
+      version=''
     fi
+    GOFLAGS="" GOBIN="$toolbin" go install "${tool_pkg}${version}"
   fi
-  (( install_failed )) && return ${install_failed}
-  shift 2
-  ${tool} "$@"
+  shift 1
+  ${toolpath} "$@"
 }
 
 # Add function call to trap
@@ -604,7 +600,7 @@ function go_update_deps() {
   export GONOSUMDB="${GONOSUMDB:-},knative.dev/*"
   export GONOPROXY="${GONOPROXY:-},knative.dev/*"
 
-  echo "=== Update Deps for Golang"
+  logger.info "=== Update Deps for Golang"
 
   local UPGRADE=0
   local RELEASE="v9000.1" # release v9000 is so far in the future, it will always pick the default branch.
@@ -630,12 +626,12 @@ function go_update_deps() {
     else
       group "Upgrading to release ${RELEASE}"
     fi
-    FLOATING_DEPS+=( $(run_go_tool knative.dev/test-infra/buoy buoy float ${REPO_ROOT_DIR}/go.mod "${buoyArgs[@]}") )
+    FLOATING_DEPS+=( $(run_go_tool knative.dev/test-infra/buoy float ${REPO_ROOT_DIR}/go.mod "${buoyArgs[@]}") )
     if [[ ${#FLOATING_DEPS[@]} > 0 ]]; then
-      echo "Floating deps to ${FLOATING_DEPS[@]}"
+      logger.debug "Floating deps to ${FLOATING_DEPS[@]}"
       go get -d ${FLOATING_DEPS[@]}
     else
-      echo "Nothing to upgrade."
+      logger.success "Nothing to upgrade."
     fi
   fi
 
@@ -664,6 +660,8 @@ function go_update_deps() {
 
   group "Removing broken symlinks"
   remove_broken_symlinks ./vendor
+
+  logger.success "Dependencies updated."
 }
 
 # Return the go module name of the current module.
@@ -708,14 +706,14 @@ function update_licenses() {
   local dst=$1
   local dir=$2
   shift
-  run_go_tool github.com/google/go-licenses go-licenses save "${dir}" --save_path="${dst}" --force || \
+  run_go_tool github.com/google/go-licenses save "${dir}" --save_path="${dst}" --force || \
     { echo "--- FAIL: go-licenses failed to update licenses"; return 1; }
 }
 
 # Run go-licenses to check for forbidden licenses.
 function check_licenses() {
   # Check that we don't have any forbidden licenses.
-  run_go_tool github.com/google/go-licenses go-licenses check "${REPO_ROOT_DIR}/..." || \
+  run_go_tool github.com/google/go-licenses check "${REPO_ROOT_DIR}/..." || \
     { echo "--- FAIL: go-licenses failed the license check"; return 1; }
 }
 
